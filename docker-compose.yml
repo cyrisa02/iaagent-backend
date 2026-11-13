@@ -1,0 +1,18 @@
+version: "3.8"
+
+services:
+  db:
+    image: postgres:15-alpine
+    container_name: iaagent_postgres
+    restart: always
+    environment:
+      POSTGRES_USER: iaagent_user
+      POSTGRES_PASSWORD: iaagent_secret_password
+      POSTGRES_DB: iaagent_db
+    ports:
+      - "5432:5432"
+    volumes:
+      # Persistance locale : les données brutes de Postgres sont ici
+      - ./docker_data/postgres:/var/lib/postgresql/data
+      # Dossier pour les sauvegardes automatiques
+      - ./backups:/backups
