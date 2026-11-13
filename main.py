@@ -50,11 +50,16 @@ def get_db_connection():
     )
 
 # --- SCHÉMAS PYDANTIC ---
-class LigneFacture(BaseModel):
-    designation: str
-    libelle: Optional[str] = None  # Description longue si présente
-    quantite: int = 1
-    prixFinal: float
+class InfosFournisseur(BaseModel):
+    raison_sociale: Optional[str] = None
+    siren: Optional[str] = None
+    tva_intracom: Optional[str] = None
+    adresse: Optional[str] = None
+    code_postal: Optional[str] = None
+    ville: Optional[str] = None
+    pays: Optional[str] = "France"
+    email: Optional[str] = None
+    tel_fixe: Optional[str] = None
 
 class ExtractionFacture(BaseModel):
     date: str = Field(description="Format YYYY-MM-DD")
@@ -64,6 +69,7 @@ class ExtractionFacture(BaseModel):
     montant_ttc: float
     numero_facture: Optional[str] = None
     lignes: Optional[List[dict]] = None
+    fournisseur_infos: Optional[InfosFournisseur] = None
 
 class ImageRequest(BaseModel):
     image_base64: str
@@ -164,24 +170,24 @@ async def fetch_and_parse_url(url: str) -> dict:
         async with httpx.AsyncClient(timeout=15.0, follow_redirects=True) as client:
             response = await client.get(url, headers={"User-Agent": "Mozilla/5.0"})
             response.raise_for_status()
-            
+
             soup = BeautifulSoup(response.text, 'html.parser')
-            
+
             title = soup.title.string if soup.title else None
             meta_desc = soup.find('meta', attrs={'name': 'description'})
             meta_description = meta_desc['content'] if meta_desc else None
-            
+
             h1_tags = soup.find_all('h1')
             images = soup.find_all('img')
             images_without_alt = sum(1 for img in images if not img.get('alt'))
-            
+
             links = soup.find_all('a', href=True)
             internal_links = 0
             external_links = 0
-            
+
             parsed_url = urlparse(url)
             domain = parsed_url.netloc
-            
+
             for link in links:
                 href = link['href']
                 if href.startswith('http'):
@@ -192,10 +198,10 @@ async def fetch_and_parse_url(url: str) -> dict:
                         external_links += 1
                 elif href.startswith('/'):
                     internal_links += 1
-            
+
             text = soup.get_text()
             word_count = len(text.split())
-            
+
             return {
                 "title": title,
                 "meta_description": meta_description,
@@ -225,21 +231,23 @@ async def extract_invoice(request: ImageRequest, background_tasks: BackgroundTas
             messages=[{
                 "role": "user",
                 "content": [
-                    {"type": "text", "text": "Extrais les données de cette facture. Pour chaque ligne, fournis un objet avec : designation (nom court du produit/service), libelle (description détaillée si présente sur la facture, sinon mets la designation), quantite (nombre), prixFinal (prix total de la ligne)."},
+                    {"type": "text", "text": "Extrais les données de cette facture. Pour chaque ligne, fournis un objet avec : designation (nom court du produit/service), libelle (description détaillée si présente sur la facture, sinon mets la designation), quantite (nombre), prixFinal (prix total de la ligne). Extrais aussi les infos du fournisseur : raison_sociale, siren (9 chiffres), tva_intracom (FR + 11 chiffres), adresse complète, code_postal, ville, pays, email, tel_fixe. Si une info n'est pas visible, mets null."},
                     {"type": "image_url", "image_url": {"url": image_data_uri}}
                 ]
             }],
-            max_tokens=1000
+            max_tokens=1500
         )
 
         # Données formatées pour Evolbee
         sheets_data = {
+            "type": "facture",
             "fournisseur": extraction.fournisseur,
             "date_facture": extraction.date,
             "montant_ht": extraction.montant_ht,
             "montant_tva": extraction.montant_tva,
             "numero_facture": extraction.numero_facture,
-            "lignes": extraction.lignes
+            "lignes": extraction.lignes,
+            "fournisseur_infos": extraction.fournisseur_infos.model_dump() if extraction.fournisseur_infos else None
         }
         background_tasks.add_task(send_to_google_sheets, sheets_data)
 
@@ -262,7 +270,7 @@ async def extract_invoice(request: ImageRequest, background_tasks: BackgroundTas
 async def generate_admin_response(request: MessageRequest):
     try:
         context_docs = search_knowledge_base(request.content)
-        
+
         if context_docs:
             context_text = "\n\n".join([
                 f"[{doc['category'].upper()}] {doc['title']}:\n{doc['content']}"
@@ -277,7 +285,7 @@ BASE DE CONNAISSANCES À UTILISER :
 Utilise ces informations pour personnaliser ta réponse."""
         else:
             system_prompt = "Tu es un assistant administratif professionnel. Propose 3 variantes de réponse."
-        
+
         response = groq_client.chat.completions.create(
             model="qwen/qwen3.8-27b",
             response_model=AgentResponse,
@@ -287,7 +295,7 @@ Utilise ces informations pour personnaliser ta réponse."""
             ],
             max_tokens=500
         )
-        
+
         db_data = {
             "message_type": request.type,
             "content": request.content,
@@ -295,7 +303,7 @@ Utilise ces informations pour personnaliser ta réponse."""
             "context_used": context_text if context_docs else None
         }
         db_task("conversations", db_data)
-        
+
         return response
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -306,7 +314,7 @@ async def analyze_flyer(file: UploadFile = File(...), document_type: str = Form(
         image_bytes = await file.read()
         image_base64 = base64.b64encode(image_bytes).decode('utf-8')
         image_data_uri = f"data:image/jpeg;base64,{image_base64}"
-        
+
         analysis = groq_client.chat.completions.create(
             model="qwen/qwen3.8-27b",
             response_model=MarketingAnalysis,
@@ -316,7 +324,7 @@ async def analyze_flyer(file: UploadFile = File(...), document_type: str = Form(
             ]}],
             max_tokens=1000
         )
-        
+
         db_data = {
             "document_type": document_type,
             "file_path": file.filename,
@@ -325,7 +333,7 @@ async def analyze_flyer(file: UploadFile = File(...), document_type: str = Form(
             "improvements": json.dumps(analysis.improvements)
         }
         db_task("marketing_documents", db_data)
-        
+
         return analysis
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -342,7 +350,7 @@ async def get_prospect_strategy(secteur: str, localisation: str):
             ],
             max_tokens=500
         )
-        
+
         db_data = {
             "nom_entreprise": f"Prospect {secteur}",
             "type_entreprise": secteur,
@@ -353,7 +361,7 @@ async def get_prospect_strategy(secteur: str, localisation: str):
             "action_recommandee": strategy.action
         }
         db_task("prospects", db_data)
-        
+
         return strategy
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -383,7 +391,7 @@ async def search_knowledge(q: str):
 async def analyze_seo(url: str = Query(...), focus_keyword: Optional[str] = Query(None)):
     try:
         page_data = await fetch_and_parse_url(url)
-        
+
         analysis_prompt = f"""Analyse SEO de cette page web :
 URL: {url}
 Mot-clé cible: {focus_keyword or 'Non spécifié'}
@@ -415,7 +423,7 @@ Réponds en JSON avec cette structure :
   "recommendations": [<liste de strings>],
   "html_snippet": "<snippet HTML optimisé ou null>"
 }}"""
-        
+
         analysis = groq_client.chat.completions.create(
             model="qwen/qwen3.8-27b",
             response_model=SEOAnalysis,
@@ -425,7 +433,7 @@ Réponds en JSON avec cette structure :
             ],
             max_tokens=1500
         )
-        
+
         analysis.url = url
         analysis.title_found = page_data['title']
         analysis.meta_description = page_data['meta_description']
@@ -434,7 +442,7 @@ Réponds en JSON avec cette structure :
         analysis.internal_links = page_data['internal_links']
         analysis.external_links = page_data['external_links']
         analysis.word_count = page_data['word_count']
-        
+
         db_data = {
             "url": url,
             "focus_keyword": focus_keyword,
@@ -452,7 +460,7 @@ Réponds en JSON avec cette structure :
             "html_snippet": analysis.html_snippet
         }
         db_task("seo_analyses", db_data)
-        
+
         return analysis
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
